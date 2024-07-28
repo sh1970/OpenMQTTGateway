@@ -27,14 +27,20 @@
 */
 #include "User_config.h"
 
-// States of the gateway
-// Wm setup
-// Connected to MQTT
-// Disconnected from Wifi
-// Disconnected from MQTT
-// Deep sleep
-// Local OTA in progress
-// Remote OTA in progress
+enum GatewayState {
+  WAITING_ONBOARDING,
+  ONBOARDING,
+  OFFLINE,
+  NTWK_CONNECTED,
+  BROKER_CONNECTED,
+  PROCESSING,
+  NTWK_DISCONNECTED,
+  BROKER_DISCONNECTED,
+  LOCAL_OTA_IN_PROGRESS,
+  REMOTE_OTA_IN_PROGRESS,
+  SLEEPING
+};
+GatewayState gatewayState = GatewayState::WAITING_ONBOARDING;
 
 // Macros and structure to enable the duplicates removing on the following gateways
 #if defined(ZgatewayRF) || defined(ZgatewayIR) || defined(ZgatewaySRFB) || defined(ZgatewayWeatherStation) || defined(ZgatewayRTL_433)
@@ -71,9 +77,7 @@ int maxQueueLength = 0;
  * Deep-sleep for the ESP8266 & ESP32 we need some form of indicator that we have posted the measurements and am ready to deep sleep.
  * Set this to true in the sensor code after publishing the measurement.
  */
-#if defined(DEEP_SLEEP_IN_US) || defined(ESP32_EXT0_WAKE_PIN)
 bool ready_to_sleep = false;
-#endif
 
 #include <ArduinoJson.h>
 #include <ArduinoLog.h>
@@ -88,6 +92,7 @@ struct JsonBundle {
 std::queue<JsonBundle> jsonQueue;
 
 #ifdef ESP32
+#  include <driver/adc.h>
 // Mutex  to protect the queue
 SemaphoreHandle_t xQueueMutex;
 bool blufiConnectAP = false;
@@ -850,6 +855,7 @@ void delayWithOTA(long waitMillis) {
 
 void SYSConfig_init() {
   SYSConfig.XtoMQTT = DEFAULT_XtoMQTT;
+  SYSConfig.offline = DEFAULT_OFFLINE;
 #ifdef ZmqttDiscovery
   SYSConfig.discovery = DEFAULT_DISCOVERY;
   SYSConfig.ohdiscovery = OpenHABDiscovery;
@@ -857,10 +863,12 @@ void SYSConfig_init() {
 #ifdef RGB_INDICATORS
   SYSConfig.rgbbrightness = DEFAULT_ADJ_BRIGHTNESS;
 #endif
+  SYSConfig.powerMode = DEFAULT_LOW_POWER_MODE;
 }
 
 void SYSConfig_fromJson(JsonObject& SYSdata) {
   Config_update(SYSdata, "xtomqtt", SYSConfig.XtoMQTT);
+  Config_update(SYSdata, "offline", SYSConfig.offline);
 #ifdef ZmqttDiscovery
   Config_update(SYSdata, "disc", SYSConfig.discovery);
   Config_update(SYSdata, "ohdisc", SYSConfig.ohdiscovery);
@@ -868,7 +876,33 @@ void SYSConfig_fromJson(JsonObject& SYSdata) {
 #ifdef RGB_INDICATORS
   Config_update(SYSdata, "rgbb", SYSConfig.rgbbrightness);
 #endif
+  Config_update(SYSdata, "powermode", SYSConfig.powerMode);
 }
+
+#ifdef ESP32
+void SYSConfig_save() {
+  StaticJsonDocument<JSON_MSG_BUFFER> jsonBuffer;
+  JsonObject SYSdata = jsonBuffer.to<JsonObject>();
+  SYSdata["xtomqtt"] = SYSConfig.XtoMQTT;
+  SYSdata["offline"] = SYSConfig.offline;
+  SYSdata["powermode"] = SYSConfig.powerMode;
+#  ifdef ZmqttDiscovery
+  SYSdata["disc"] = SYSConfig.discovery;
+  SYSdata["ohdisc"] = SYSConfig.ohdiscovery;
+#  endif
+#  ifdef RGB_INDICATORS
+  SYSdata["rgbb"] = SYSConfig.rgbbrightness;
+#  endif
+  String conf = "";
+  serializeJson(jsonBuffer, conf);
+  preferences.begin(Gateway_Short_Name, false);
+  int result = preferences.putString("SYSConfig", conf);
+  preferences.end();
+  Log.notice(F("SYS Config_save: %s, result: %d" CR), conf.c_str(), result);
+}
+#else // Function not available for ESP8266
+void SYSConfig_save() {}
+#endif
 
 #if defined(ESP32)
 void SYSConfig_load() {
@@ -1021,6 +1055,7 @@ void setupMQTT() {
 
     displayPrint("MQTT connected");
     Log.notice(F("Connected to broker" CR));
+    gatewayState = GatewayState::BROKER_CONNECTED;
     failure_number_mqtt = 0;
     // Once connected, publish an announcement...
     pub(will_Topic, Gateway_AnnouncementMsg, will_Retain);
@@ -1044,11 +1079,12 @@ void setupMQTT() {
   };
 
   mqtt->connection_failure_callback = [] {
-    if (WiFi.status() != WL_CONNECTED && ethConnected == false) {
-      // No WiFi connection, MQTT couldn't connect, ignore this failure
+    if (WiFi.status() != WL_CONNECTED || ethConnected == false || SYSConfig.offline) {
+      // No network connection or offline, ignore this failure
       return;
     }
     failure_number_mqtt++; // we count the failure
+    gatewayState = GatewayState::BROKER_DISCONNECTED;
     Log.warning(F("failure_number_mqtt: %d" CR), failure_number_mqtt);
 
     const auto& parameters = cnt_parameters_array[cnt_index];
@@ -1227,6 +1263,9 @@ void setup() {
   SYSConfig_init();
   SYSConfig_load();
 
+  if (SYSConfig.offline)
+    gatewayState = GatewayState::OFFLINE;
+
   //setup LED status
   SetupIndicatorError();
   SetupIndicatorSendReceive();
@@ -1241,15 +1280,6 @@ void setup() {
 #  endif
 #elif ESP32
   xQueueMutex = xSemaphoreCreateMutex();
-#  if DEFAULT_LOW_POWER_MODE != -1 //  don't check preferences value if low power mode is not activated
-  preferences.begin(Gateway_Short_Name, false);
-  if (preferences.isKey("lowpowermode")) {
-    lowpowermode = preferences.getUInt("lowpowermode", DEFAULT_LOW_POWER_MODE);
-  } else {
-    Log.notice(F("No lowpowermode config to load" CR));
-  }
-  preferences.end();
-#  endif
 #  if defined(ZboardM5STICKC) || defined(ZboardM5STICKCP) || defined(ZboardM5STACK) || defined(ZboardM5TOUGH)
   setupM5();
 #  endif
@@ -1261,31 +1291,19 @@ void setup() {
 
   Log.notice(F("OpenMQTTGateway Version: " OMG_VERSION CR));
 
-/**
- * Deep-sleep for the ESP8266 & ESP32 we need some form of indicator that we have posted the measurements and am ready to deep sleep.
- * When woken set back to false.
- */
-#if defined(DEEP_SLEEP_IN_US) || defined(ESP32_EXT0_WAKE_PIN)
-  ready_to_sleep = false;
-#endif
-
-#ifdef DEEP_SLEEP_IN_US
-#  ifdef ESP8266
-  Log.notice(F("Setting wake pin for deep sleep." CR));
-  pinMode(ESP8266_DEEP_SLEEP_WAKE_PIN, WAKEUP_PULLUP);
-#  endif
-#  ifdef ESP32
-  Log.notice(F("Setting duration for deep sleep." CR));
-  if (esp_sleep_enable_timer_wakeup(DEEP_SLEEP_IN_US) != ESP_OK) {
-    Log.error(F("Failed to set deep sleep duration." CR));
-  }
-#  endif
-#endif
-
 #ifdef ESP32_EXT0_WAKE_PIN
   Log.notice(F("Setting EXT0 Wakeup for deep sleep." CR));
-  if (esp_sleep_enable_ext0_wakeup(ESP32_EXT0_WAKE_PIN, ESP32_EXT0_WAKE_PIN_STATE) != ESP_OK) {
+  gpio_num_t wake_pin0 = static_cast<gpio_num_t>(ESP32_EXT0_WAKE_PIN);
+  if (esp_sleep_enable_ext0_wakeup(wake_pin0, ESP32_EXT0_WAKE_PIN_STATE) != ESP_OK) {
     Log.error(F("Failed to set deep sleep EXT0 Wakeup." CR));
+  }
+#endif
+#ifdef ESP32_EXT1_WAKE_PIN
+  Log.notice(F("Setting EXT1 Wakeup for deep sleep." CR));
+  uint64_t wake_pin_bitmask = 1ULL << ESP32_EXT1_WAKE_PIN; // Adjust this line if multiple pins are used.
+  esp_sleep_ext1_wakeup_mode_t wake_state1 = static_cast<esp_sleep_ext1_wakeup_mode_t>(ESP32_EXT1_WAKE_PIN_STATE);
+  if (esp_sleep_enable_ext1_wakeup(wake_pin_bitmask, wake_state1) != ESP_OK) {
+    Log.error(F("Failed to set deep sleep EXT1 Wakeup." CR));
   }
 #endif
 #ifdef ESP32
@@ -1302,6 +1320,10 @@ void setup() {
 #ifdef ZactuatorONOFF
   setupONOFF();
   modules.add(ZactuatorONOFF);
+#endif
+
+#if defined(ESP32) && defined(USE_BLUFI)
+  startBlufi();
 #endif
 
 #if defined(ESPWifiManualSetup)
@@ -1523,6 +1545,7 @@ bool wifi_reconnect_bypass() {
   extern bool omg_blufi_ble_connected;
   if (omg_blufi_ble_connected) {
     Log.notice(F("BLUFI is connected, bypassing wifi reconnect" CR));
+    gatewayState = GatewayState::ONBOARDING;
     return true;
   }
 #endif
@@ -1581,6 +1604,7 @@ void setOTA() {
   });
   ArduinoOTA.onProgress([](unsigned int progress, unsigned int total) {
     Log.trace(F("Progress: %u%%\r" CR), (progress / (total / 100)));
+    gatewayState = GatewayState::LOCAL_OTA_IN_PROGRESS;
 #ifdef ESP32
     //esp_task_wdt_reset();
 #endif
@@ -1738,9 +1762,9 @@ void setup_wifi() {
     Log.trace(F("." CR));
     failure_number_ntwk++;
 #  if defined(ESP32) && defined(ZgatewayBT)
-    if (lowpowermode) {
+    if (SYSConfig.powerMode) {
       if (failure_number_ntwk > maxConnectionRetryNetwork) {
-        lowPowerESP32();
+        sleep();
       }
     } else {
       if (failure_number_ntwk > maxRetryWatchDog) {
@@ -2186,26 +2210,12 @@ void setupwifi(bool reset_settings) {
   wifiManager.setBreakAfterConfig(true); // If ethernet is used, we don't want to block the connection by keeping the portal up
 #  endif
 
-  if (!wifi_reconnect_bypass()) // if we didn't connect with saved credential we start Wifimanager web portal / Blufi
+  if (!SYSConfig.offline && !wifi_reconnect_bypass()) // if we didn't connect with saved credential we start Wifimanager web portal / Blufi
   {
-
-#  if defined(ESP32) && defined(USE_BLUFI)
-    startBlufi();
-#  endif
-#  ifdef ESP32
-    if (lowpowermode < 2) {
-      displayPrint("Connect your phone to WIFI AP:", WifiManager_ssid, ota_pass);
-    } else { // in case of low power mode we put the ESP to sleep again if we didn't get connected (typical in case the wifi is down)
-#    ifdef ZgatewayBT
-      lowPowerESP32();
-#    endif
-    }
-#  endif
-
     InfoIndicatorON();
     ErrorIndicatorON();
     Log.notice(F("Connect your phone to WIFI AP: %s with PWD: %s" CR), WifiManager_ssid, ota_pass);
-
+    gatewayState = GatewayState::ONBOARDING;
     //fetches ssid and pass and tries to connect
     //if it does not connect it starts an access point with the specified name
     //and goes into a blocking loop awaiting configuration
@@ -2348,6 +2358,48 @@ void WiFiEvent(WiFiEvent_t event) {
   }
 }
 #  endif
+#endif
+
+#if DEFAULT_LOW_POWER_MODE != -1 && defined(ESP32)
+/**
+ * Deep-sleep for the ESP32 - e.g. DEEP_SLEEP_IN_US 30000000 for 30 seconds / wake by ESP32_EXT0_WAKE_PIN/ESP32_EXT1_WAKE_PIN.
+ * Everything is off and (almost) all execution state is lost.
+ */
+void sleep() {
+  if (SYSConfig.powerMode < PowerMode::INTERVAL)
+    return;
+  Log.notice(F("Entering deep sleep" CR));
+  gatewayState = GatewayState::SLEEPING;
+  delay(250); // To allow the LEDs to switch off and MQTT message to be sent
+#  if defined(ZboardM5STACK) || defined(ZboardM5STICKC) || defined(ZboardM5STICKCP) || defined(ZboardM5TOUGH)
+  sleepScreen();
+  esp_sleep_enable_ext0_wakeup((gpio_num_t)SLEEP_BUTTON, LOW);
+#  endif
+  Log.trace(F("Deactivating ESP32 components" CR));
+#  ifdef ZgatewayBT
+  stopProcessing();
+  ProcessLock = true;
+#  endif
+#  pragma GCC diagnostic push
+#  pragma GCC diagnostic ignored "-Wdeprecated-declarations"
+  adc_power_off();
+#  pragma GCC diagnostic pop
+  esp_wifi_stop();
+#  ifdef ESP32_EXT0_WAKE_PIN
+  Log.notice(F("Entering deep sleep, EXT0 Wakeup by pin : %l." CR), ESP32_EXT0_WAKE_PIN);
+#  endif
+#  ifdef ESP32_EXT1_WAKE_PIN
+  Log.notice(F("Entering deep sleep, EXT1 Wakeup by pin : %l." CR), ESP32_EXT1_WAKE_PIN);
+#  endif
+  if (SYSConfig.powerMode == PowerMode::ACTION) {
+    esp_deep_sleep_start();
+  } else if (SYSConfig.powerMode == PowerMode::INTERVAL) {
+    Log.notice(F("Entering deep sleep for %l us." CR), DEEP_SLEEP_IN_US);
+    esp_deep_sleep(DEEP_SLEEP_IN_US);
+  }
+}
+#else
+void sleep() {}
 #endif
 
 void loop() {
@@ -2548,11 +2600,12 @@ void loop() {
 #  endif
 #endif
     }
-  } else { // disconnected from network
+  } else if (!SYSConfig.offline) { // disconnected from network
 #ifdef ESP32
     //esp_task_wdt_reset();
 #endif
     Log.warning(F("Network disconnected" CR));
+    gatewayState = GatewayState::NTWK_DISCONNECTED;
     ErrorIndicatorON();
     delay(2000); // add a delay to avoid ESP32 crash and reset
 #ifdef ESP32
@@ -2570,27 +2623,9 @@ void loop() {
   loopSSD1306();
 #endif
 
-/**
- * Deep-sleep for the ESP8266 & ESP32 - e.g. DEEP_SLEEP_IN_US 30000000 for 30 seconds / wake by ESP32_EXT0_WAKE_PIN.
- * Everything is off and (almost) all execution state is lost.
- */
-#if defined(DEEP_SLEEP_IN_US) || defined(ESP32_EXT0_WAKE_PIN)
   if (ready_to_sleep) {
-    delay(250); //Give some time for last MQTT messages to be sent
-#  ifdef DEEP_SLEEP_IN_US
-    Log.notice(F("Entering deep sleep for %l us." CR), DEEP_SLEEP_IN_US);
-#  endif
-#  ifdef ESP32_EXT0_WAKE_PIN
-    Log.notice(F("Entering deep sleep, EXT0 Wakeup by pin : %l." CR), ESP32_EXT0_WAKE_PIN);
-#  endif
-#  ifdef ESP8266
-    ESP.deepSleep(DEEP_SLEEP_IN_US);
-#  endif
-#  ifdef ESP32
-    esp_deep_sleep_start();
-#  endif
+    sleep();
   }
-#endif
 }
 
 /**
@@ -2717,6 +2752,7 @@ String stateMeasures() {
   SYSdata["tempc"] = round2(intTemperatureRead());
 #  endif
   SYSdata["freestck"] = uxTaskGetStackHighWaterMark(NULL);
+  SYSdata["powermode"] = SYSConfig.powerMode;
 #endif
 
   SYSdata["eth"] = ethConnected;
@@ -2734,12 +2770,6 @@ String stateMeasures() {
     SYSdata["ip"] = ip2CharArray(WiFi.localIP());
     SYSdata["mac"] = (char*)WiFi.macAddress().c_str();
   }
-
-#ifdef ZgatewayBT
-#  ifdef ESP32
-  SYSdata["lowpowermode"] = (int)lowpowermode;
-#  endif
-#endif
 #ifdef ZboardM5STACK
   M5.Power.begin();
   SYSdata["m5battlevel"] = (int8_t)M5.Power.getBatteryLevel();
@@ -3080,6 +3110,7 @@ void MQTTHttpsFWUpdate(char* topicOri, JsonObject& HttpsFwUpdateData) {
 #    endif
 #  endif
       Log.warning(F("Starting firmware update" CR));
+      gatewayState = GatewayState::REMOTE_OTA_IN_PROGRESS;
 
       SendReceiveIndicatorON();
       ErrorIndicatorON();
@@ -3422,6 +3453,14 @@ void MQTTtoSYS(char* topicOri, JsonObject& SYSdata) { // json object decoding
       SYSConfig.XtoMQTT = SYSdata["xtomqtt"];
       Log.notice(F("xtomqtt: %T" CR), SYSConfig.XtoMQTT);
     }
+    if (SYSdata.containsKey("offline") && SYSdata["offline"].is<bool>()) {
+      SYSConfig.offline = SYSdata["offline"];
+      Log.notice(F("offline: %T" CR), SYSConfig.offline);
+    }
+    if (SYSdata.containsKey("powermode") && SYSdata["powermode"].is<int>()) {
+      SYSConfig.powerMode = SYSdata["powermode"];
+      Log.notice(F("Power mode: %d" CR), SYSConfig.powerMode);
+    }
     if (SYSdata.containsKey("disc")) {
       if (SYSdata["disc"].is<bool>()) {
         if (SYSdata["disc"] == true && SYSConfig.discovery == false)
@@ -3435,25 +3474,9 @@ void MQTTtoSYS(char* topicOri, JsonObject& SYSdata) { // json object decoding
       }
       Log.notice(F("Discovery state: %T" CR), SYSConfig.discovery);
     }
-#ifdef ESP32
     if (SYSdata.containsKey("save") && SYSdata["save"].as<bool>()) {
-      StaticJsonDocument<JSON_MSG_BUFFER> jsonBuffer;
-      JsonObject jo = jsonBuffer.to<JsonObject>();
-      jo["disc"] = SYSConfig.discovery;
-      jo["ohdisc"] = SYSConfig.ohdiscovery;
-      jo["xtomqtt"] = SYSConfig.XtoMQTT;
-#  ifdef RGB_INDICATORS
-      jo["rgbb"] = SYSConfig.rgbbrightness;
-#  endif
-      // Save config into NVS (non-volatile storage)
-      String conf = "";
-      serializeJson(jsonBuffer, conf);
-      preferences.begin(Gateway_Short_Name, false);
-      int result = preferences.putString("SYSConfig", conf);
-      preferences.end();
-      Log.notice(F("SYS Config_save: %s, result: %d" CR), conf.c_str(), result);
+      SYSConfig_save();
     }
-#endif
     if (restartESP) {
       ESPRestart(7);
     }
