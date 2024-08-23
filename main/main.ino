@@ -714,7 +714,7 @@ void pubMQTT(const char* topic, const char* payload) {
  * @param retainFlag  true if retain the retain Flag
  */
 void pubMQTT(const char* topic, const char* payload, bool retainFlag) {
-  if (SYSConfig.XtoMQTT) {
+  if (SYSConfig.XtoMQTT && !SYSConfig.offline) {
     if (mqtt && mqtt->connected()) {
       SendReceiveIndicatorON();
       Log.trace(F("[ OMG->MQTT ] topic: %s msg: %s " CR), topic, payload);
@@ -723,7 +723,7 @@ void pubMQTT(const char* topic, const char* payload, bool retainFlag) {
       Log.warning(F("MQTT not connected, aborting the publication" CR));
     }
   } else {
-    Log.notice(F("[ OMG->MQTT CANCELED] topic: %s msg: %s " CR), topic, payload);
+    Log.notice(F("[ OMG->MQTT deactivated or offline] topic: %s msg: %s " CR), topic, payload);
   }
 }
 
@@ -1532,7 +1532,7 @@ void setup() {
   modules.add(ZgatewayRTL_433);
 #endif
   Log.trace(F("mqtt_max_payload_size: %d" CR), mqtt_max_payload_size);
-
+  SYSConfig.offline ? Log.notice(F("Offline enabled" CR)) : Log.notice(F("Offline disabled" CR));
   char jsonChar[100];
   serializeJson(modules, jsonChar, measureJson(modules) + 1);
   Log.notice(F("OpenMQTTGateway modules: %s" CR), jsonChar);
@@ -2360,7 +2360,7 @@ void WiFiEvent(WiFiEvent_t event) {
 #  endif
 #endif
 
-#if DEFAULT_LOW_POWER_MODE != -1 && defined(ESP32)
+#if DEFAULT_LOW_POWER_MODE != DEACTIVATED && defined(ESP32)
 /**
  * Deep-sleep for the ESP32 - e.g. DEEP_SLEEP_IN_US 30000000 for 30 seconds / wake by ESP32_EXT0_WAKE_PIN/ESP32_EXT1_WAKE_PIN.
  * Everything is off and (almost) all execution state is lost.
@@ -2410,10 +2410,11 @@ void loop() {
 #ifdef ESP32
   //esp_task_wdt_reset();
 #endif
-
-  if (mqttSetupPending) {
-    setupMQTT();
-    mqttSetupPending = false;
+  if (!SYSConfig.offline) {
+    if (mqttSetupPending) {
+      setupMQTT();
+      mqttSetupPending = false;
+    }
   }
 
   unsigned long now = millis();
@@ -2476,129 +2477,10 @@ void loop() {
 #if defined(ESP32) && defined(MQTT_HTTPS_FW_UPDATE)
           checkForUpdates();
 #endif
-#ifdef ZgatewayBT
-          BTProcessLock = !BTConfig.enabled; // Release BLE processes at start if enabled
-#endif
         }
-
         timer_sys_checks = millis();
       }
       emptyQueue();
-#ifdef ZsensorBME280
-      MeasureTempHumAndPressure(); //Addon to measure Temperature, Humidity, Pressure and Altitude with a Bosch BME280/BMP280
-#endif
-#ifdef ZsensorHTU21
-      MeasureTempHum(); //Addon to measure Temperature, Humidity, of a HTU21 sensor
-#endif
-#ifdef ZsensorLM75
-      MeasureTemp(); //Addon to measure Temperature of an LM75 sensor
-#endif
-#ifdef ZsensorAHTx0
-      MeasureAHTTempHum(); //Addon to measure Temperature, Humidity, of an 'AHTx0' sensor
-#endif
-#ifdef ZsensorHCSR04
-      MeasureDistance(); //Addon to measure distance with a HC-SR04
-#endif
-#ifdef ZsensorBH1750
-      MeasureLightIntensity(); //Addon to measure Light Intensity with a BH1750
-#endif
-#ifdef ZsensorMQ2
-      MeasureGasMQ2();
-#endif
-#ifdef ZsensorTEMT6000
-      MeasureLightIntensityTEMT6000();
-#endif
-#ifdef ZsensorTSL2561
-      MeasureLightIntensityTSL2561();
-#endif
-#ifdef ZsensorC37_YL83_HMRD
-      MeasureC37_YL83_HMRDWater(); //Addon for leak detection with a C-37 YL-83 H-MRD
-#endif
-#ifdef ZsensorDHT
-      MeasureTempAndHum(); //Addon to measure the temperature with a DHT
-#endif
-#ifdef ZsensorSHTC3
-      MeasureTempAndHum(); //Addon to measure the temperature with a DHT
-#endif
-#ifdef ZsensorDS1820
-      MeasureDS1820Temp(); //Addon to measure the temperature with DS1820 sensor(s)
-#endif
-#ifdef ZsensorINA226
-      MeasureINA226();
-#endif
-#ifdef ZsensorHCSR501
-      MeasureHCSR501();
-#endif
-#ifdef ZsensorGPIOInput
-      MeasureGPIOInput();
-#endif
-#ifdef ZsensorGPIOKeyCode
-      MeasureGPIOKeyCode();
-#endif
-#ifdef ZsensorADC
-      MeasureADC(); //Addon to measure the analog value of analog pin
-#endif
-#ifdef ZsensorTouch
-      MeasureTouch();
-#endif
-#ifdef ZgatewayLORA
-      LORAtoMQTT();
-#  ifdef ZmqttDiscovery
-      if (SYSConfig.discovery)
-        launchLORADiscovery(false);
-#  endif
-#endif
-#ifdef ZgatewayRF
-      RFtoMQTT();
-#endif
-#ifdef ZgatewayRF2
-      RF2toMQTT();
-#endif
-#ifdef ZgatewayWeatherStation
-      ZgatewayWeatherStationtoMQTT();
-#endif
-#ifdef ZgatewayGFSunInverter
-      ZgatewayGFSunInverterMQTT();
-#endif
-#ifdef ZgatewayPilight
-      PilighttoMQTT();
-#endif
-#ifdef ZgatewayBT
-#  ifdef ZmqttDiscovery
-      if (SYSConfig.discovery)
-        launchBTDiscovery(false);
-#  endif
-#endif
-#ifdef ZgatewaySRFB
-      SRFBtoMQTT();
-#endif
-#ifdef ZgatewayIR
-      IRtoMQTT();
-#endif
-#ifdef Zgateway2G
-      if (_2GtoMQTT())
-        Log.trace(F("2GtoMQTT OK" CR));
-#endif
-#ifdef ZgatewayRFM69
-      if (RFM69toMQTT())
-        Log.trace(F("RFM69toMQTT OK" CR));
-#endif
-#ifdef ZgatewaySERIAL
-      SERIALtoMQTT();
-#endif
-#ifdef ZactuatorFASTLED
-      FASTLEDLoop();
-#endif
-#ifdef ZactuatorPWM
-      PWMLoop();
-#endif
-#ifdef ZgatewayRTL_433
-      RTL_433Loop();
-#  ifdef ZmqttDiscovery
-      if (SYSConfig.discovery)
-        launchRTL_433Discovery(false);
-#  endif
-#endif
     }
   } else if (!SYSConfig.offline) { // disconnected from network
 #ifdef ESP32
@@ -2622,7 +2504,121 @@ void loop() {
 #if defined(ZdisplaySSD1306)
   loopSSD1306();
 #endif
-
+#ifdef ZsensorBME280
+  MeasureTempHumAndPressure(); //Addon to measure Temperature, Humidity, Pressure and Altitude with a Bosch BME280/BMP280
+#endif
+#ifdef ZsensorHTU21
+  MeasureTempHum(); //Addon to measure Temperature, Humidity, of a HTU21 sensor
+#endif
+#ifdef ZsensorLM75
+  MeasureTemp(); //Addon to measure Temperature of an LM75 sensor
+#endif
+#ifdef ZsensorAHTx0
+  MeasureAHTTempHum(); //Addon to measure Temperature, Humidity, of an 'AHTx0' sensor
+#endif
+#ifdef ZsensorHCSR04
+  MeasureDistance(); //Addon to measure distance with a HC-SR04
+#endif
+#ifdef ZsensorBH1750
+  MeasureLightIntensity(); //Addon to measure Light Intensity with a BH1750
+#endif
+#ifdef ZsensorMQ2
+  MeasureGasMQ2();
+#endif
+#ifdef ZsensorTEMT6000
+  MeasureLightIntensityTEMT6000();
+#endif
+#ifdef ZsensorTSL2561
+  MeasureLightIntensityTSL2561();
+#endif
+#ifdef ZsensorC37_YL83_HMRD
+  MeasureC37_YL83_HMRDWater(); //Addon for leak detection with a C-37 YL-83 H-MRD
+#endif
+#ifdef ZsensorDHT
+  MeasureTempAndHum(); //Addon to measure the temperature with a DHT
+#endif
+#ifdef ZsensorSHTC3
+  MeasureTempAndHum(); //Addon to measure the temperature with a DHT
+#endif
+#ifdef ZsensorDS1820
+  MeasureDS1820Temp(); //Addon to measure the temperature with DS1820 sensor(s)
+#endif
+#ifdef ZsensorINA226
+  MeasureINA226();
+#endif
+#ifdef ZsensorHCSR501
+  MeasureHCSR501();
+#endif
+#ifdef ZsensorGPIOInput
+  MeasureGPIOInput();
+#endif
+#ifdef ZsensorGPIOKeyCode
+  MeasureGPIOKeyCode();
+#endif
+#ifdef ZsensorADC
+  MeasureADC(); //Addon to measure the analog value of analog pin
+#endif
+#ifdef ZsensorTouch
+  MeasureTouch();
+#endif
+#ifdef ZgatewayLORA
+  LORAtoMQTT();
+#  ifdef ZmqttDiscovery
+  if (SYSConfig.discovery)
+    launchLORADiscovery(false);
+#  endif
+#endif
+#ifdef ZgatewayRF
+  RFtoMQTT();
+#endif
+#ifdef ZgatewayRF2
+  RF2toMQTT();
+#endif
+#ifdef ZgatewayWeatherStation
+  ZgatewayWeatherStationtoMQTT();
+#endif
+#ifdef ZgatewayGFSunInverter
+  ZgatewayGFSunInverterMQTT();
+#endif
+#ifdef ZgatewayPilight
+  PilighttoMQTT();
+#endif
+#ifdef ZgatewayBT
+#  ifdef ZmqttDiscovery
+  if (SYSConfig.discovery)
+    launchBTDiscovery(false);
+#  endif
+#endif
+#ifdef ZgatewaySRFB
+  SRFBtoMQTT();
+#endif
+#ifdef ZgatewayIR
+  IRtoMQTT();
+#endif
+#ifdef Zgateway2G
+  if (_2GtoMQTT())
+    Log.trace(F("2GtoMQTT OK" CR));
+#endif
+#ifdef ZgatewayRFM69
+  if (RFM69toMQTT())
+    Log.trace(F("RFM69toMQTT OK" CR));
+#endif
+#ifdef ZgatewaySERIAL
+  SERIALtoMQTT();
+#endif
+#ifdef ZactuatorFASTLED
+  FASTLEDLoop();
+#endif
+#ifdef ZactuatorPWM
+  PWMLoop();
+#endif
+#ifdef ZgatewayRTL_433
+  RTL_433Loop();
+#  ifdef ZmqttDiscovery
+  if (SYSConfig.discovery)
+    launchRTL_433Discovery(false);
+#  endif
+#endif
   if (ready_to_sleep) {
     sleep();
   }
@@ -3456,6 +3452,14 @@ void MQTTtoSYS(char* topicOri, JsonObject& SYSdata) { // json object decoding
     if (SYSdata.containsKey("offline") && SYSdata["offline"].is<bool>()) {
       SYSConfig.offline = SYSdata["offline"];
       Log.notice(F("offline: %T" CR), SYSConfig.offline);
+      if (SYSConfig.offline) {
+        gatewayState = GatewayState::OFFLINE;
+        // Disconnect MQTT
+        mqtt->disconnect();
+        // Disconnect network
+        if (WiFi.status() == WL_CONNECTED)
+          WiFi.disconnect(true);
+      }
     }
     if (SYSdata.containsKey("powermode") && SYSdata["powermode"].is<int>()) {
       SYSConfig.powerMode = SYSdata["powermode"];

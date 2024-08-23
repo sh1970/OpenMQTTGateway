@@ -1310,7 +1310,7 @@ void pubMqttDiscovery() {
                   stateClassNone, //State Class
                   "false", "true" //state_off, state_on
   );
-#      if DEFAULT_LOW_POWER_MODE != -1
+#      if DEFAULT_LOW_POWER_MODE != DEACTIVATED
   createDiscovery("switch", //set Type
                   subjectSYStoMQTT, "SYS: Low Power Mode command", (char*)getUniqueId("powermode", "").c_str(), //set state_topic,name,uniqueId
                   will_Topic, "", "{{ value_json.powermode | bool }}", //set availability_topic,device_class,value_template,

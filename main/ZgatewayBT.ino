@@ -804,27 +804,18 @@ void stopProcessing() {
 void coreTask(void* pvParameters) {
   while (true) {
     if (!BTProcessLock) {
-      int n = 0;
-      while (mqtt->connected() && n <= InitialMQTTConnectionTimeout && !BTProcessLock) {
-        n++;
-        delay(1000);
-      }
-      if (!mqtt->connected()) {
-        Log.warning(F("MQTT client or Network disconnected no BLE scan" CR));
-      } else if (!BTProcessLock) {
-        if (xSemaphoreTake(semaphoreBLEOperation, pdMS_TO_TICKS(30000)) == pdTRUE) {
-          BLEscan();
-          // Launching a connect every TimeBtwConnect
-          if (millis() > (timeBetweenConnect + BTConfig.intervalConnect) && BTConfig.bleConnect) {
-            timeBetweenConnect = millis();
-            BLEconnect();
-          }
-          //dumpDevices();
-          Log.trace(F("CoreTask stack free: %u" CR), uxTaskGetStackHighWaterMark(xCoreTaskHandle));
-          xSemaphoreGive(semaphoreBLEOperation);
-        } else {
-          Log.error(F("Failed to start scan - BLE busy" CR));
+      if (xSemaphoreTake(semaphoreBLEOperation, pdMS_TO_TICKS(30000)) == pdTRUE) {
+        BLEscan();
+        // Launching a connect every TimeBtwConnect
+        if (millis() > (timeBetweenConnect + BTConfig.intervalConnect) && BTConfig.bleConnect) {
+          timeBetweenConnect = millis();
+          BLEconnect();
         }
+        //dumpDevices();
+        Log.trace(F("CoreTask stack free: %u" CR), uxTaskGetStackHighWaterMark(xCoreTaskHandle));
+        xSemaphoreGive(semaphoreBLEOperation);
+      } else {
+        Log.error(F("Failed to start scan - BLE busy" CR));
       }
       if (SYSConfig.powerMode > 0) {
         int scan = atomic_exchange_explicit(&forceBTScan, 0, ::memory_order_seq_cst); // is this enough, it will wait the full deepsleep...
@@ -845,7 +836,6 @@ void coreTask(void* pvParameters) {
 void setupBTTasksAndBLE() {
   BLEDevice::setScanDuplicateCacheSize(BLEScanDuplicateCacheSize);
   BLEDevice::init("");
-
   xTaskCreatePinnedToCore(
       procBLETask, /* Function to implement the task */
       "procBLETask", /* Name of the task */
@@ -897,6 +887,7 @@ void setupBT() {
   BLEQueue = xQueueCreate(QueueSize, sizeof(NimBLEAdvertisedDevice*));
   if (BTConfig.enabled) {
     setupBTTasksAndBLE();
+    BTProcessLock = false;
     Log.notice(F("ZgatewayBT multicore ESP32 setup done" CR));
   } else {
     Log.notice(F("ZgatewayBT multicore ESP32 setup disabled" CR));
